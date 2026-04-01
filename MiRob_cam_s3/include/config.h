@@ -1,0 +1,116 @@
+#ifndef CONFIG_H
+#define CONFIG_H
+
+#include <esp_camera.h>
+
+// Mode switch button (short press toggles mode)
+#define PIN_MODE_BUTTON                     3
+#define MODE_BUTTON_ACTIVE_LOW              0
+#define MODE_BUTTON_USE_INTERNAL_PULLUP     1
+
+// Capture button (short press captures in mode1/mode2/mode3/mode5)
+#define PIN_CAPTURE_BUTTON                  21
+#define CAPTURE_BUTTON_ACTIVE_LOW           0
+#define CAPTURE_BUTTON_USE_INTERNAL_PULLUP  1
+
+// WS2812 mode indicator
+#define PIN_MODE_WS2812                     20
+#define MODE_WS2812_LED_COUNT               1
+#define MODE_WS2812_BRIGHTNESS              24
+#define RECORD_SIGNAL_BLINK_MS              180
+#define RECORD_SIGNAL_COLOR_R               255
+#define RECORD_SIGNAL_COLOR_G               0
+#define RECORD_SIGNAL_COLOR_B               0
+
+// Fill light (on during capture)
+#define PIN_FILL_LIGHT                      48
+#define FILL_LIGHT_ACTIVE                   HIGH
+#define FILL_LIGHT_WARMUP_MS                80
+
+// Button debounce
+#define CAPTURE_BUTTON_DEBOUNCE_MS          30
+
+// TF card and photo storage
+#define SD_MMC_1BIT                         0
+#define PHOTO_DIR                           "/photos"
+#define PHOTO_PREFIX                        "img_"
+#define PHOTO_EXT                           ".jpg"
+#define VIDEO_DIR                           "/videos"
+#define VIDEO_PREFIX                        "vid_"
+#define VIDEO_EXT                           ".avi"
+
+// Capture flow control
+#define CAPTURE_MIN_INTERVAL_MS             500
+#define SD_REINIT_INTERVAL_MS               5000
+#define CAPTURE_DISCARD_FRAMES_BEFORE_SAVE  1
+#define CAPTURE_DISCARD_FRAME_DELAY_MS      40
+#define VIDEO_FPS                           8
+#define VIDEO_DURATION_MS                   6000
+#define VIDEO_DISCARD_FRAMES_BEFORE_SAVE    1
+#define VIDEO_DISCARD_FRAME_DELAY_MS        25
+#define VIDEO_USE_FILL_LIGHT                0
+#define VIDEO_FILL_LIGHT_WARMUP_MS          60
+
+// Camera sensor select
+// Set CAM_SENSOR_TYPE to CAM_SENSOR_OV3660 or CAM_SENSOR_OV5640.
+#define CAM_SENSOR_OV3660                   3660
+#define CAM_SENSOR_OV5640                   5640
+#define CAM_SENSOR_TYPE                     CAM_SENSOR_OV3660
+
+// Photo/record profile (mode1/mode2/mode3/mode5 capture) - independent per sensor
+#if (CAM_SENSOR_TYPE == CAM_SENSOR_OV3660)
+#define CAMERA_MODEL_NAME                   "OV3660"
+#define CAM_PHOTO_FRAME_SIZE                FRAMESIZE_UXGA
+#define CAM_PHOTO_QUALITY                   8
+#define CAM_RECORD_FRAME_SIZE               FRAMESIZE_SVGA
+#define CAM_RECORD_QUALITY                  12
+#define CAM_AEC_VALUE                       150
+#define CAM_AGC_GAIN                        4
+#elif (CAM_SENSOR_TYPE == CAM_SENSOR_OV5640)
+#define CAMERA_MODEL_NAME                   "OV5640"
+#define CAM_PHOTO_FRAME_SIZE                FRAMESIZE_UXGA
+#define CAM_PHOTO_QUALITY                   10
+#define CAM_RECORD_FRAME_SIZE               FRAMESIZE_XGA
+#define CAM_RECORD_QUALITY                  12
+#define CAM_AEC_VALUE                       220
+#define CAM_AGC_GAIN                        4
+#else
+#error "Unsupported CAM_SENSOR_TYPE. Use CAM_SENSOR_OV3660 or CAM_SENSOR_OV5640."
+#endif
+
+// Preview profile (mode4: low resolution web stream)
+#define CAM_PREVIEW_FRAME_SIZE              FRAMESIZE_QVGA
+#define CAM_PREVIEW_QUALITY                 20
+#define CAM_PREVIEW_FRAME_DELAY_MS          90
+
+// Backward compatibility alias (old name)
+#define PHOTO_QUALITY                       CAM_PHOTO_QUALITY
+
+// Manual AE/AGC tuning for fixed capture modes (mode1/mode2). AWB stays auto.
+#define LOCK_AE_AWB                         1
+
+// Camera clock
+// Use a conservative XCLK to improve sensor init stability.
+#define CAM_XCLK_FREQ                       10000000
+
+// Preview network (SoftAP)
+#define PREVIEW_AP_SSID                     "MiRob-CAM-Preview"
+#define PREVIEW_AP_PASSWORD                 "12345678"
+#define PREVIEW_AP_CHANNEL                  6
+#define PREVIEW_AP_MAX_CLIENTS              2
+
+// TFT screen (SPI)
+#define TFT_SCL_PIN                         18
+#define TFT_SDA_PIN                         19
+#define TFT_DC_PIN                          10
+#define TFT_CS_PIN                          -1
+#define TFT_RST_PIN                         47
+#define TFT_BL_PIN                          -1
+#define TFT_BL_ACTIVE                       HIGH
+#define TFT_WIDTH                           240
+#define TFT_HEIGHT                          240
+#define TFT_ROTATION                        1
+#define TFT_SPI_MODE                        SPI_MODE3
+#define TFT_SPI_HZ                          4000000UL
+
+#endif
