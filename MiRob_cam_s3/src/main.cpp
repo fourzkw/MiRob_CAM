@@ -44,6 +44,7 @@ struct CaptureRequest {
     CaptureSource source;
     CaptureRequestType type;
     bool useFillLight;
+    bool useAutoCamera;
 };
 
 struct NetworkCommand {
@@ -168,6 +169,22 @@ static const char* modeName(AppMode mode) {
     return "Mode4-Preview";
 }
 
+static const char* modeTftLabel(AppMode mode) {
+    if (mode == APP_MODE_CAPTURE_NO_LIGHT) {
+        return "Mode1 Photo";
+    }
+    if (mode == APP_MODE_CAPTURE_FILL_LIGHT) {
+        return "Mode2 Photo+Light";
+    }
+    if (mode == APP_MODE_CAPTURE_AUTO) {
+        return "Mode3 Auto";
+    }
+    if (mode == APP_MODE_RECORD) {
+        return "Mode5 Record";
+    }
+    return "Mode4 Preview";
+}
+
 static AppMode currentMode() {
     return s_currentMode;
 }
@@ -175,6 +192,7 @@ static AppMode currentMode() {
 static void setMode(AppMode mode) {
     s_currentMode = mode;
     setModeLed(mode);
+    display_set_mode_overlay_text(modeTftLabel(mode));
 }
 
 static void printHelp() {
@@ -186,6 +204,8 @@ static void printHelp() {
     Serial.println("  mode3            -> auto capture (auto exposure/gain)");
     Serial.println("  mode4            -> web preview mode");
     Serial.println("  mode5            -> record video mode");
+    Serial.println("  tfttest          -> TFT solid JPEG test (RGB888->JPEG->decode)");
+    Serial.println("  tfttest off      -> exit TFT JPEG test, resume camera live");
     Serial.println("  mode             -> print current mode");
     Serial.println("  help             -> print this help");
     Serial.println("Button IO3:");
@@ -200,12 +220,18 @@ static const char* captureSourceTag(CaptureSource source) {
     return (source == CAPTURE_SOURCE_SERIAL) ? "[SERIAL]" : "[BTN]";
 }
 
-static void capturePhotoWithLog(const char* sourceTag) {
+static void capturePhotoWithLog(const char* sourceTag, bool useAutoCamera) {
     String path;
-    if (storage_capture_and_save(path)) {
+    uint8_t* jpegDup = nullptr;
+    size_t jpegDupLen = 0;
+    if (storage_capture_and_save(path, useAutoCamera, &jpegDup, &jpegDupLen)) {
         Serial.println(String(sourceTag) + " capture ok: " + path);
         log_append(String(sourceTag) + " capture ok: " + path);
-        display_show_capture(true, path);
+        if (jpegDup && jpegDupLen > 0) {
+            display_queue_post_capture_jpeg(jpegDup, jpegDupLen, TFT_CAPTURE_REVIEW_HOLD_MS);
+        } else {
+            display_show_capture(true, path);
+        }
     } else {
         Serial.println(String(sourceTag) + " capture failed");
         log_append(String(sourceTag) + " capture failed");
@@ -250,6 +276,7 @@ static bool requestCaptureOrRecord(CaptureSource source) {
     req.source = source;
     req.type = modeIsRecord(mode) ? CAPTURE_REQUEST_VIDEO : CAPTURE_REQUEST_PHOTO;
     req.useFillLight = modeUsesFillLight(mode);
+    req.useAutoCamera = modeUsesAutoCamera(mode);
     if (xQueueSend(s_captureRequestQueue, &req, 0) != pdTRUE) {
         Serial.println("Capture queue full, request dropped");
         return false;
@@ -281,18 +308,18 @@ static bool sendNetworkCommandAndWait(NetworkCommandType type, NetworkResult& ou
     return true;
 }
 
-static bool applyCaptureCameraProfile(AppMode mode) {
-    return modeUsesAutoCamera(mode) ? camera_apply_auto_photo_profile() : camera_apply_photo_profile();
-}
-
 static bool applyCameraProfileForMode(AppMode mode) {
     if (mode == APP_MODE_PREVIEW) {
         return camera_apply_preview_profile();
     }
-    if (mode == APP_MODE_RECORD) {
-        return camera_apply_record_profile();
+    if (modeIsRecord(mode)) {
+        camera_set_tft_live_ae(CAMERA_TFT_LIVE_AE_STREAM_AUTO);
+    } else if (modeUsesAutoCamera(mode)) {
+        camera_set_tft_live_ae(CAMERA_TFT_LIVE_AE_PHOTO_AUTO);
+    } else {
+        camera_set_tft_live_ae(CAMERA_TFT_LIVE_AE_PHOTO_MANUAL);
     }
-    return applyCaptureCameraProfile(mode);
+    return camera_apply_tft_live_profile();
 }
 
 static bool switchToCaptureMode(AppMode targetMode, const char* switchingLine) {
@@ -314,13 +341,16 @@ static bool switchToCaptureMode(AppMode targetMode, const char* switchingLine) {
         }
     }
 
+    camera_set_tft_live_ae(
+        modeUsesAutoCamera(targetMode) ? CAMERA_TFT_LIVE_AE_PHOTO_AUTO : CAMERA_TFT_LIVE_AE_PHOTO_MANUAL
+    );
     const bool needCameraProfileUpdate =
         (fromMode == APP_MODE_PREVIEW) ||
         (fromMode == APP_MODE_RECORD) ||
         (modeUsesAutoCamera(fromMode) != modeUsesAutoCamera(targetMode));
-    if (needCameraProfileUpdate && !applyCaptureCameraProfile(targetMode)) {
-        Serial.println("Mode switch failed: camera capture profile");
-        log_append("Mode switch failed: camera capture profile");
+    if (needCameraProfileUpdate && !camera_apply_tft_live_profile()) {
+        Serial.println("Mode switch failed: camera TFT live profile");
+        log_append("Mode switch failed: camera TFT live profile");
         display_show_boot("Capture switch FAIL", "Camera profile");
         return false;
     }
@@ -369,9 +399,10 @@ static bool switchToRecordMode() {
         }
     }
 
-    if (!camera_apply_record_profile()) {
-        Serial.println("Mode switch failed: camera record profile");
-        log_append("Mode switch failed: camera record profile");
+    camera_set_tft_live_ae(CAMERA_TFT_LIVE_AE_STREAM_AUTO);
+    if (!camera_apply_tft_live_profile()) {
+        Serial.println("Mode switch failed: camera TFT live profile");
+        log_append("Mode switch failed: camera TFT live profile");
         display_show_boot("Mode5 switch FAIL", "Camera profile");
         return false;
     }
@@ -486,6 +517,17 @@ static void handleSerialCommands() {
 
             if (lower == "mode5") {
                 (void)switchToRecordMode();
+                continue;
+            }
+
+            if (lower == "tfttest off" || lower == "tfttest_off") {
+                display_set_jpeg_solid_test(false);
+                Serial.println("TFT JPEG solid test: OFF");
+                continue;
+            }
+            if (lower == "tfttest" || lower == "tfttest on" || lower == "tfttest_on") {
+                display_set_jpeg_solid_test(true);
+                Serial.println("TFT JPEG solid test: ON (red/green/blue/white/black cycle)");
                 continue;
             }
 
@@ -641,7 +683,7 @@ static void captureTask(void* arg) {
         if (req.useFillLight && FILL_LIGHT_WARMUP_MS > 0) {
             vTaskDelay(pdMS_TO_TICKS(FILL_LIGHT_WARMUP_MS));
         }
-        capturePhotoWithLog(captureSourceTag(req.source));
+        capturePhotoWithLog(captureSourceTag(req.source), req.useAutoCamera);
         if (req.useFillLight) {
             setFillLight(false);
         }
@@ -699,6 +741,7 @@ static void controlTask(void* arg) {
 
     for (;;) {
         storage_poll();
+        display_set_tf_unavailable(!storage_ok());
         handleSerialCommands();
 
         InputEventType ev = INPUT_EVENT_CAPTURE;
@@ -710,12 +753,87 @@ static void controlTask(void* arg) {
     }
 }
 
+static void keepCameraLiveDuringReviewHold() {
+    static uint32_t s_nextKeepaliveMs = 0;
+
+    const uint32_t intervalMs =
+        (TFT_CAPTURE_REVIEW_KEEPALIVE_MS > 0) ? static_cast<uint32_t>(TFT_CAPTURE_REVIEW_KEEPALIVE_MS) : 0U;
+    const uint32_t remainingMs = display_capture_review_remaining_ms();
+    if (intervalMs == 0 || remainingMs == 0 || !camera_ok() || currentMode() == APP_MODE_PREVIEW || s_recording) {
+        s_nextKeepaliveMs = 0;
+        return;
+    }
+
+    const uint32_t now = millis();
+    if (s_nextKeepaliveMs != 0 && (int32_t)(now - s_nextKeepaliveMs) < 0) {
+        return;
+    }
+
+    camera_fb_t* fb = camera_capture_frame();
+    if (fb) {
+        camera_return_frame(fb);
+    }
+    s_nextKeepaliveMs = now + intervalMs;
+}
+
+static void tftPreviewTask(void* arg) {
+    (void)arg;
+
+    for (;;) {
+        if (!display_ok()) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+        if (display_jpeg_solid_test_tick()) {
+            vTaskDelay(pdMS_TO_TICKS(TFT_LIVE_REFRESH_MIN_MS));
+            continue;
+        }
+        if (display_try_show_pending_capture_review()) {
+            vTaskDelay(pdMS_TO_TICKS(TFT_LIVE_REFRESH_MIN_MS));
+            continue;
+        }
+        if (display_capture_review_hold_active()) {
+            keepCameraLiveDuringReviewHold();
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+        if (!camera_ok()) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+        if (currentMode() == APP_MODE_PREVIEW) {
+            vTaskDelay(pdMS_TO_TICKS(120));
+            continue;
+        }
+        if (s_recording) {
+            vTaskDelay(pdMS_TO_TICKS(80));
+            continue;
+        }
+
+        camera_fb_t* fb = camera_capture_frame();
+        if (!fb) {
+            vTaskDelay(pdMS_TO_TICKS(40));
+            continue;
+        }
+        if (fb->format == PIXFORMAT_JPEG || fb->format == PIXFORMAT_RGB565) {
+            display_draw_camera_live(fb);
+            display_draw_live_status_overlays();
+            display_draw_mode_overlay();
+        }
+        camera_return_frame(fb);
+        vTaskDelay(pdMS_TO_TICKS(TFT_LIVE_REFRESH_MIN_MS));
+    }
+}
+
 void setup() {
     Serial.begin(115200);
     delay(500);
     Serial.printf("\nMiRob CAM %s + TF\n", CAMERA_MODEL_NAME);
 
     display_init();
+#if (TFT_JPEG_SOLID_TEST_AT_BOOT != 0)
+    display_set_jpeg_solid_test(true);
+#endif
     display_show_boot("Booting...", "Init camera");
 
     log_init();
@@ -742,6 +860,11 @@ void setup() {
         display_show_boot("Camera init FAIL", "Init storage");
     } else {
         display_show_boot("Camera init OK", "Init storage");
+        camera_set_tft_live_ae(CAMERA_TFT_LIVE_AE_PHOTO_MANUAL);
+        if (!camera_apply_tft_live_profile()) {
+            Serial.println("Init: TFT live camera profile failed");
+            log_append("TFT live camera profile failed");
+        }
     }
     Serial.println("Init: camera_init done");
 
@@ -749,8 +872,9 @@ void setup() {
     if (!storage_init()) {
         log_append("SD init fail");
         Serial.println("Init: storage_init FAILED");
-        display_show_boot("Storage init FAIL", "Check TF card");
+        display_set_tf_unavailable(true);
     } else {
+        display_set_tf_unavailable(false);
         display_show_boot("Mode1: Capture", "No fill | IO21=snap");
     }
     Serial.println("Init: storage_init done");
@@ -772,6 +896,7 @@ void setup() {
     xTaskCreatePinnedToCore(controlTask, "control_task", 6144, nullptr, 1, nullptr, 1);
     xTaskCreatePinnedToCore(recordingSignalTask, "record_led_task", 3072, nullptr, 1, nullptr, 1);
     xTaskCreatePinnedToCore(captureTask, "capture_task", 8192, nullptr, 1, nullptr, 1);
+    xTaskCreatePinnedToCore(tftPreviewTask, "tft_preview", 8192, nullptr, 1, nullptr, 1);
     xTaskCreatePinnedToCore(networkTask, "network_task", 6144, nullptr, 1, nullptr, 0);
 }
 

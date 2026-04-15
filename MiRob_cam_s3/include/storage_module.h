@@ -14,7 +14,14 @@ bool storage_capture_ready(uint32_t* waitMs);
 
 // Capture one photo and save it to TF card.
 // outPath returns the saved path when successful.
-bool storage_capture_and_save(String& outPath);
+// useAutoCamera selects auto exposure profile (mode3); otherwise manual photo profile.
+// If outJpegDup/outJpegDupLen are non-null and save succeeds, a heap copy of the JPEG is returned (caller must free()).
+bool storage_capture_and_save(
+    String& outPath,
+    bool useAutoCamera = false,
+    uint8_t** outJpegDup = nullptr,
+    size_t* outJpegDupLen = nullptr
+);
 
 // Record one MJPEG-in-AVI clip to TF card using VIDEO_* config parameters.
 // outPath returns saved file path; outFrames/outDurationMs report actual clip stats.

@@ -80,8 +80,15 @@
 
 // Preview profile (mode4: low resolution web stream)
 #define CAM_PREVIEW_FRAME_SIZE              FRAMESIZE_QVGA
-#define CAM_PREVIEW_QUALITY                 20
+#define CAM_PREVIEW_QUALITY                 12
 #define CAM_PREVIEW_FRAME_DELAY_MS          90
+
+// TFT live view: JPEG QVGA (decoded to RGB565 on display); QVGA center-cropped to 240x240
+#define CAM_TFT_LIVE_FRAME_SIZE             FRAMESIZE_QVGA
+#define TFT_LIVE_REFRESH_MIN_MS             40
+// 拍照成功后 TFT 全屏显示刚保存的 JPEG，持续时间（毫秒）后恢复实时预览。
+#define TFT_CAPTURE_REVIEW_HOLD_MS          2000
+#define TFT_CAPTURE_REVIEW_KEEPALIVE_MS     160
 
 // Backward compatibility alias (old name)
 #define PHOTO_QUALITY                       CAM_PHOTO_QUALITY
@@ -109,8 +116,18 @@
 #define TFT_BL_ACTIVE                       HIGH
 #define TFT_WIDTH                           240
 #define TFT_HEIGHT                          240
-#define TFT_ROTATION                        1
+#define TFT_ROTATION                        3
 #define TFT_SPI_MODE                        SPI_MODE3
-#define TFT_SPI_HZ                          4000000UL
+#define TFT_SPI_HZ                          1000000UL
+// If live colors look wrong (red/blue swapped), toggle to 0.
+#define TFT_RGB565_BIG_ENDIAN               1
+
+// TFT 纯色 JPEG 测试：用 RGB888 填图 → fmt2jpg → jpg2rgb565 → 全屏，验证 JPEG 编解码与屏幕链路。
+// 1 = 上电进入测试（不取摄像头预览帧）；也可用串口命令 tfttest / tfttest off 切换。
+#define TFT_JPEG_SOLID_TEST_AT_BOOT         0
+#define TFT_JPEG_SOLID_TEST_INTERVAL_MS     1000
+#define TFT_JPEG_SOLID_TEST_JPEG_QUALITY    10
+#define TFT_JPEG_SOLID_TEST_WIDTH           320
+#define TFT_JPEG_SOLID_TEST_HEIGHT          240
 
 #endif

@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <esp_camera.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #include "config.h"
 #include "camera_module.h"
@@ -30,6 +32,9 @@
 #define PCLK_GPIO_NUM     2   // pclk-io2
 
 static bool s_camOk = false;
+static SemaphoreHandle_t s_camMux = nullptr;
+static camera_tft_live_ae_t s_tftLiveAe = CAMERA_TFT_LIVE_AE_PHOTO_MANUAL;
+
 static const uint8_t AWB_WARMUP_FRAMES = 2;
 static const uint16_t AWB_WARMUP_DELAY_MS = 40;
 
@@ -37,10 +42,12 @@ enum CameraRuntimeProfile : uint8_t {
     CAMERA_PROFILE_PHOTO_MANUAL = 1,
     CAMERA_PROFILE_PHOTO_AUTO = 2,
     CAMERA_PROFILE_PREVIEW = 3,
-    CAMERA_PROFILE_RECORD = 4
+    CAMERA_PROFILE_RECORD = 4,
+    CAMERA_PROFILE_TFT_LIVE = 5
 };
 
-static void warmupFrames(uint8_t count, uint16_t delayMs) {
+// Caller must hold s_camMux (or call only from camera_init before mux exists — not used).
+static void warmupFramesDirect(uint8_t count, uint16_t delayMs) {
     for (uint8_t i = 0; i < count; ++i) {
         camera_fb_t* warmupFb = esp_camera_fb_get();
         if (warmupFb) {
@@ -62,10 +69,48 @@ static const char* profileName(CameraRuntimeProfile profile) {
     if (profile == CAMERA_PROFILE_RECORD) {
         return "record";
     }
+    if (profile == CAMERA_PROFILE_TFT_LIVE) {
+        return "tft-live";
+    }
     return "preview";
 }
 
-static bool applyProfileInternal(framesize_t frameSize, uint8_t jpegQuality, CameraRuntimeProfile profile) {
+void camera_set_tft_live_ae(camera_tft_live_ae_t ae) {
+    s_tftLiveAe = ae;
+}
+
+#if defined(LOCK_AE_AWB) && (LOCK_AE_AWB)
+static void applyAePhotoManual(sensor_t* s) {
+    s->set_exposure_ctrl(s, 0);
+    s->set_aec_value(s, CAM_AEC_VALUE);
+    s->set_gain_ctrl(s, 0);
+    s->set_agc_gain(s, CAM_AGC_GAIN);
+    s->set_whitebal(s, 1);
+    warmupFramesDirect(AWB_WARMUP_FRAMES, AWB_WARMUP_DELAY_MS);
+}
+
+static void applyAePhotoAuto(sensor_t* s) {
+    s->set_exposure_ctrl(s, 1);
+    s->set_gain_ctrl(s, 1);
+    s->set_whitebal(s, 1);
+    warmupFramesDirect(2, 30);
+}
+
+static void applyAeStreamAuto(sensor_t* s) {
+    s->set_exposure_ctrl(s, 1);
+    s->set_gain_ctrl(s, 1);
+    s->set_whitebal(s, 1);
+    warmupFramesDirect(1, 20);
+}
+#endif
+
+// Requires s_camMux held (except camera_init first apply — see below).
+static bool applyProfileInternal(
+    pixformat_t pixformat,
+    framesize_t frameSize,
+    uint8_t jpegQuality,
+    CameraRuntimeProfile profile
+) {
     sensor_t* s = esp_camera_sensor_get();
     if (!s) {
         Serial.println("Camera: sensor unavailable");
@@ -73,77 +118,161 @@ static bool applyProfileInternal(framesize_t frameSize, uint8_t jpegQuality, Cam
     }
 
     bool ok = true;
+    if (s->set_pixformat(s, pixformat) != 0) {
+        Serial.printf("Camera: set_pixformat failed (%d)\n", (int)pixformat);
+        ok = false;
+    }
     if (s->set_framesize(s, frameSize) != 0) {
         Serial.printf("Camera: set_framesize failed (%d)\n", (int)frameSize);
         ok = false;
     }
-    if (s->set_quality(s, jpegQuality) != 0) {
-        Serial.printf("Camera: set_quality failed (%d)\n", (int)jpegQuality);
-        ok = false;
+    if (pixformat == PIXFORMAT_JPEG) {
+        if (s->set_quality(s, jpegQuality) != 0) {
+            Serial.printf("Camera: set_quality failed (%d)\n", (int)jpegQuality);
+            ok = false;
+        }
     }
 
 #if defined(LOCK_AE_AWB) && (LOCK_AE_AWB)
     if (profile == CAMERA_PROFILE_PHOTO_MANUAL) {
-        s->set_exposure_ctrl(s, 0); // 0 => manual AEC
-        s->set_aec_value(s, CAM_AEC_VALUE);
-        s->set_gain_ctrl(s, 0);     // 0 => manual AGC
-        s->set_agc_gain(s, CAM_AGC_GAIN);
-        s->set_whitebal(s, 1);      // keep AWB on
-        warmupFrames(AWB_WARMUP_FRAMES, AWB_WARMUP_DELAY_MS);
+        applyAePhotoManual(s);
     } else if (profile == CAMERA_PROFILE_PHOTO_AUTO) {
-        s->set_exposure_ctrl(s, 1); // auto AEC
-        s->set_gain_ctrl(s, 1);     // auto AGC
-        s->set_whitebal(s, 1);      // auto AWB
-        warmupFrames(2, 30);
+        applyAePhotoAuto(s);
     } else if (profile == CAMERA_PROFILE_RECORD) {
-        s->set_exposure_ctrl(s, 1); // auto AEC
-        s->set_gain_ctrl(s, 1);     // auto AGC
-        s->set_whitebal(s, 1);      // auto AWB
-        warmupFrames(1, 20);
+        applyAeStreamAuto(s);
+    } else if (profile == CAMERA_PROFILE_PREVIEW) {
+        applyAeStreamAuto(s);
+    } else if (profile == CAMERA_PROFILE_TFT_LIVE) {
+        if (s_tftLiveAe == CAMERA_TFT_LIVE_AE_PHOTO_MANUAL) {
+            applyAePhotoManual(s);
+        } else if (s_tftLiveAe == CAMERA_TFT_LIVE_AE_PHOTO_AUTO) {
+            applyAePhotoAuto(s);
+        } else {
+            applyAeStreamAuto(s);
+        }
     } else {
-        // Preview mode favors adaptation speed over fixed exposure.
-        s->set_exposure_ctrl(s, 1); // auto AEC
-        s->set_gain_ctrl(s, 1);     // auto AGC
-        s->set_whitebal(s, 1);      // auto AWB
-        warmupFrames(1, 20);
+        applyAeStreamAuto(s);
     }
 #endif
 
     Serial.printf(
-        "Camera profile applied: mode=%s frame_size=%d quality=%d\n",
+        "Camera profile applied: mode=%s pixfmt=%d frame_size=%d quality=%d\n",
         profileName(profile),
+        (int)pixformat,
         (int)frameSize,
         (int)jpegQuality
     );
     return ok;
 }
 
+// One-time init path: mutex not yet created; do not take s_camMux.
+static bool applyProfileInternalInitOnly(
+    pixformat_t pixformat,
+    framesize_t frameSize,
+    uint8_t jpegQuality,
+    CameraRuntimeProfile profile
+) {
+    return applyProfileInternal(pixformat, frameSize, jpegQuality, profile);
+}
+
 bool camera_apply_photo_profile() {
-    if (!s_camOk) {
+    if (!s_camOk || !s_camMux) {
         return false;
     }
-    return applyProfileInternal(CAM_PHOTO_FRAME_SIZE, CAM_PHOTO_QUALITY, CAMERA_PROFILE_PHOTO_MANUAL);
+    xSemaphoreTakeRecursive(s_camMux, portMAX_DELAY);
+    bool ok = applyProfileInternal(PIXFORMAT_JPEG, CAM_PHOTO_FRAME_SIZE, CAM_PHOTO_QUALITY, CAMERA_PROFILE_PHOTO_MANUAL);
+    xSemaphoreGiveRecursive(s_camMux);
+    return ok;
 }
 
 bool camera_apply_auto_photo_profile() {
-    if (!s_camOk) {
+    if (!s_camOk || !s_camMux) {
         return false;
     }
-    return applyProfileInternal(CAM_PHOTO_FRAME_SIZE, CAM_PHOTO_QUALITY, CAMERA_PROFILE_PHOTO_AUTO);
+    xSemaphoreTakeRecursive(s_camMux, portMAX_DELAY);
+    bool ok = applyProfileInternal(PIXFORMAT_JPEG, CAM_PHOTO_FRAME_SIZE, CAM_PHOTO_QUALITY, CAMERA_PROFILE_PHOTO_AUTO);
+    xSemaphoreGiveRecursive(s_camMux);
+    return ok;
 }
 
 bool camera_apply_record_profile() {
-    if (!s_camOk) {
+    if (!s_camOk || !s_camMux) {
         return false;
     }
-    return applyProfileInternal(CAM_RECORD_FRAME_SIZE, CAM_RECORD_QUALITY, CAMERA_PROFILE_RECORD);
+    xSemaphoreTakeRecursive(s_camMux, portMAX_DELAY);
+    bool ok = applyProfileInternal(PIXFORMAT_JPEG, CAM_RECORD_FRAME_SIZE, CAM_RECORD_QUALITY, CAMERA_PROFILE_RECORD);
+    xSemaphoreGiveRecursive(s_camMux);
+    return ok;
 }
 
 bool camera_apply_preview_profile() {
-    if (!s_camOk) {
+    if (!s_camOk || !s_camMux) {
         return false;
     }
-    return applyProfileInternal(CAM_PREVIEW_FRAME_SIZE, CAM_PREVIEW_QUALITY, CAMERA_PROFILE_PREVIEW);
+    xSemaphoreTakeRecursive(s_camMux, portMAX_DELAY);
+    bool ok = applyProfileInternal(PIXFORMAT_JPEG, CAM_PREVIEW_FRAME_SIZE, CAM_PREVIEW_QUALITY, CAMERA_PROFILE_PREVIEW);
+    xSemaphoreGiveRecursive(s_camMux);
+    return ok;
+}
+
+bool camera_apply_tft_live_profile() {
+    if (!s_camOk || !s_camMux) {
+        return false;
+    }
+    xSemaphoreTakeRecursive(s_camMux, portMAX_DELAY);
+    // JPEG QVGA: OV3660 等对 RGB565 支持不稳定时仍可预览；TFT 侧用 jpg2rgb565 解码显示。
+    bool ok = applyProfileInternal(
+        PIXFORMAT_JPEG,
+        CAM_TFT_LIVE_FRAME_SIZE,
+        CAM_PREVIEW_QUALITY,
+        CAMERA_PROFILE_TFT_LIVE
+    );
+    xSemaphoreGiveRecursive(s_camMux);
+    return ok;
+}
+
+bool camera_begin_exclusive_still_capture(bool useAuto) {
+    if (!s_camOk || !s_camMux) {
+        return false;
+    }
+    xSemaphoreTakeRecursive(s_camMux, portMAX_DELAY);
+    const bool ok = useAuto
+        ? applyProfileInternal(PIXFORMAT_JPEG, CAM_PHOTO_FRAME_SIZE, CAM_PHOTO_QUALITY, CAMERA_PROFILE_PHOTO_AUTO)
+        : applyProfileInternal(PIXFORMAT_JPEG, CAM_PHOTO_FRAME_SIZE, CAM_PHOTO_QUALITY, CAMERA_PROFILE_PHOTO_MANUAL);
+    if (!ok) {
+        xSemaphoreGiveRecursive(s_camMux);
+    }
+    return ok;
+}
+
+bool camera_begin_exclusive_video_capture() {
+    if (!s_camOk || !s_camMux) {
+        return false;
+    }
+    xSemaphoreTakeRecursive(s_camMux, portMAX_DELAY);
+    const bool ok = applyProfileInternal(
+        PIXFORMAT_JPEG,
+        CAM_RECORD_FRAME_SIZE,
+        CAM_RECORD_QUALITY,
+        CAMERA_PROFILE_RECORD
+    );
+    if (!ok) {
+        xSemaphoreGiveRecursive(s_camMux);
+    }
+    return ok;
+}
+
+void camera_end_exclusive_capture() {
+    if (!s_camMux) {
+        return;
+    }
+    (void)applyProfileInternal(
+        PIXFORMAT_JPEG,
+        CAM_TFT_LIVE_FRAME_SIZE,
+        CAM_PREVIEW_QUALITY,
+        CAMERA_PROFILE_TFT_LIVE
+    );
+    xSemaphoreGiveRecursive(s_camMux);
 }
 
 bool camera_init() {
@@ -214,8 +343,20 @@ bool camera_init() {
         s->set_vflip(s, 0);
     }
 
+    s_camMux = xSemaphoreCreateRecursiveMutex();
+    if (!s_camMux) {
+        Serial.println("Camera: mutex create failed");
+        s_camOk = false;
+        return false;
+    }
+
     s_camOk = true;
-    if (!camera_apply_photo_profile()) {
+    if (!applyProfileInternalInitOnly(
+            PIXFORMAT_JPEG,
+            CAM_PHOTO_FRAME_SIZE,
+            CAM_PHOTO_QUALITY,
+            CAMERA_PROFILE_PHOTO_MANUAL
+        )) {
         Serial.println("Camera: failed to apply initial photo profile");
         s_camOk = false;
         return false;
@@ -228,10 +369,17 @@ bool camera_ok() {
 }
 
 camera_fb_t* camera_capture_frame() {
-    if (!s_camOk) {
+    if (!s_camOk || !s_camMux) {
         return nullptr;
     }
-    return esp_camera_fb_get();
+    if (xSemaphoreTakeRecursive(s_camMux, portMAX_DELAY) != pdTRUE) {
+        return nullptr;
+    }
+    camera_fb_t* fb = esp_camera_fb_get();
+    if (!fb) {
+        xSemaphoreGiveRecursive(s_camMux);
+    }
+    return fb;
 }
 
 void camera_return_frame(camera_fb_t* fb) {
@@ -239,4 +387,7 @@ void camera_return_frame(camera_fb_t* fb) {
         return;
     }
     esp_camera_fb_return(fb);
+    if (s_camMux) {
+        xSemaphoreGiveRecursive(s_camMux);
+    }
 }

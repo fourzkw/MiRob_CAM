@@ -162,11 +162,11 @@
  .pio/libdeps/esp32-s3-devkitm-1/Adafruit\ GFX\ Library/Adafruit_SPITFT.h \
  .pio/libdeps/esp32-s3-devkitm-1/Adafruit\ GFX\ Library/Adafruit_GFX.h \
  .pio/libdeps/esp32-s3-devkitm-1/Adafruit\ GFX\ Library/Adafruit_SPITFT_Macros.h \
- include/config.h \
  C:/Users/86476/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/espressif__esp32-camera/driver/include/esp_camera.h \
  C:/Users/86476/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/driver/ledc/include/driver/ledc.h \
  C:/Users/86476/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/hal/include/hal/ledc_types.h \
  C:/Users/86476/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/espressif__esp32-camera/driver/include/sensor.h \
  C:/Users/86476/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/espressif__esp32-camera/conversions/include/img_converters.h \
  C:/Users/86476/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/espressif__esp32-camera/conversions/include/esp_jpg_decode.h \
- include/display_module.h
+ C:/Users/86476/.platformio/packages/framework-arduinoespressif32-libs/esp32s3/include/espressif__esp32-camera/conversions/include/esp_jpg_decode.h \
+ include/config.h include/display_module.h

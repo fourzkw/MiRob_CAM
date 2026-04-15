@@ -3,6 +3,8 @@
 #include <FS.h>
 #include <time.h>
 
+#include <esp_heap_caps.h>
+
 #include "config.h"
 #include "camera_module.h"
 #include "storage_module.h"
@@ -619,7 +621,7 @@ bool storage_capture_ready(uint32_t* waitMs) {
     return remain == 0;
 }
 
-bool storage_capture_and_save(String& outPath) {
+bool storage_capture_and_save(String& outPath, bool useAutoCamera, uint8_t** outJpegDup, size_t* outJpegDupLen) {
     if (!camera_ok()) {
         Serial.println("Capture skipped: camera not ready");
         return false;
@@ -634,6 +636,16 @@ bool storage_capture_and_save(String& outPath) {
         Serial.printf("Capture throttled, wait %lu ms\n", (unsigned long)waitMs);
         return false;
     }
+
+    if (!camera_begin_exclusive_still_capture(useAutoCamera)) {
+        Serial.println("Capture skipped: camera exclusive still profile failed");
+        return false;
+    }
+    struct ScopedCameraExclusiveEnd {
+        ~ScopedCameraExclusiveEnd() {
+            camera_end_exclusive_capture();
+        }
+    } scopedCameraExclusive;
 
     // Discard stale frame(s) before the final save capture.
     // This helps align the saved frame with the current scene/lighting state.
@@ -700,6 +712,26 @@ bool storage_capture_and_save(String& outPath) {
         markSdOffline("open for write failed");
     }
 
+    if (outJpegDup) {
+        *outJpegDup = nullptr;
+    }
+    if (outJpegDupLen) {
+        *outJpegDupLen = 0;
+    }
+    if (ok && outJpegDup && fb && fb->buf && fb->len > 0) {
+        uint8_t* dup = static_cast<uint8_t*>(heap_caps_malloc(fb->len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (!dup) {
+            dup = static_cast<uint8_t*>(malloc(fb->len));
+        }
+        if (dup) {
+            memcpy(dup, fb->buf, fb->len);
+            *outJpegDup = dup;
+            if (outJpegDupLen) {
+                *outJpegDupLen = fb->len;
+            }
+        }
+    }
+
     camera_return_frame(fb);
     return ok;
 }
@@ -720,6 +752,16 @@ bool storage_record_video(String& outPath, uint32_t& outFrames, uint32_t& outDur
         Serial.println("Record skipped: invalid VIDEO_FPS/VIDEO_DURATION_MS");
         return false;
     }
+
+    if (!camera_begin_exclusive_video_capture()) {
+        Serial.println("Record skipped: camera exclusive video profile failed");
+        return false;
+    }
+    struct ScopedCameraExclusiveEnd {
+        ~ScopedCameraExclusiveEnd() {
+            camera_end_exclusive_capture();
+        }
+    } scopedCameraExclusive;
 
     discardFramesBeforeVideo();
 
