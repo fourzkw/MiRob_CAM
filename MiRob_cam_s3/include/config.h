@@ -100,11 +100,22 @@
 // Use a conservative XCLK to improve sensor init stability.
 #define CAM_XCLK_FREQ                       10000000
 
-// Preview network (SoftAP)
-#define PREVIEW_AP_SSID                     "MiRob-CAM-Preview"
-#define PREVIEW_AP_PASSWORD                 "12345678"
-#define PREVIEW_AP_CHANNEL                  6
-#define PREVIEW_AP_MAX_CLIENTS              2
+// Mode4: MQTT preview — connect to WiFi (STA) and publish JPEG frames to broker.
+#define MQTT_WIFI_SSID                    "YOUR_WIFI_SSID"
+#define MQTT_WIFI_PASSWORD                "YOUR_WIFI_PASSWORD"
+#define MQTT_WIFI_CONNECT_TIMEOUT_MS        20000
+
+#define MQTT_BROKER_HOST                  "192.168.1.100"
+#define MQTT_BROKER_PORT                  1883
+#define MQTT_CLIENT_ID                    "mirob_cam"
+#define MQTT_USER                         ""
+#define MQTT_PASSWORD                     ""
+#define MQTT_IMAGE_TOPIC                  "mirob/cam/image"
+
+#ifndef MQTT_MAX_PACKET_SIZE
+#define MQTT_MAX_PACKET_SIZE              65535
+#endif
+#define MQTT_MAX_PUBLISH_BYTES            (MQTT_MAX_PACKET_SIZE - 256)
 
 // TFT screen (SPI)
 #define TFT_SCL_PIN                         18

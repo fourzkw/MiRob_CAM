@@ -3,16 +3,13 @@
 
 #include <Arduino.h>
 
-// Start preview SoftAP (mode4).
-bool network_start_preview_ap();
+// Station WiFi for MQTT preview (mode4): connect to router/AP.
+bool network_sta_connect();
+void network_sta_disconnect();
+bool network_sta_connected();
+String network_sta_local_ip();
 
-// Stop preview SoftAP (leave mode4).
-void network_stop_preview_ap();
-
-bool network_is_preview_ap_running();
-String network_preview_ap_ip();
-
-// Backward compatibility API.
+// Backward compatibility (no-op / redirect).
 void network_setup();
 
 #endif // NETWORK_MODULE_H

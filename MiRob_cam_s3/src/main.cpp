@@ -10,7 +10,7 @@
 #include "log_module.h"
 #include "display_module.h"
 #include "network_module.h"
-#include "http_server_module.h"
+#include "mqtt_module.h"
 
 enum AppMode : uint8_t {
     APP_MODE_CAPTURE_NO_LIGHT = 1,
@@ -166,7 +166,7 @@ static const char* modeName(AppMode mode) {
     if (mode == APP_MODE_RECORD) {
         return "Mode5-Record";
     }
-    return "Mode4-Preview";
+    return "Mode4-MQTT";
 }
 
 static const char* modeTftLabel(AppMode mode) {
@@ -182,7 +182,7 @@ static const char* modeTftLabel(AppMode mode) {
     if (mode == APP_MODE_RECORD) {
         return "Mode5 Record";
     }
-    return "Mode4 Preview";
+    return "Mode4 MQTT";
 }
 
 static AppMode currentMode() {
@@ -202,7 +202,7 @@ static void printHelp() {
     Serial.println("  mode1            -> capture without fill light");
     Serial.println("  mode2            -> capture with fill light");
     Serial.println("  mode3            -> auto capture (auto exposure/gain)");
-    Serial.println("  mode4            -> web preview mode");
+    Serial.println("  mode4            -> MQTT preview (JPEG to broker)");
     Serial.println("  mode5            -> record video mode");
     Serial.println("  tfttest          -> TFT solid JPEG test (RGB888->JPEG->decode)");
     Serial.println("  tfttest off      -> exit TFT JPEG test, resume camera live");
@@ -213,7 +213,7 @@ static void printHelp() {
     Serial.println("Button IO21:");
     Serial.println("  short press      -> photo(mode1/2/3) or video(mode5)");
     Serial.println("Mode LED WS2812 IO20:");
-    Serial.println("  mode1=blue mode2=orange mode3=cyan mode4=green mode5=red");
+    Serial.println("  mode1=blue mode2=orange mode3=cyan mode4=green(MQTT) mode5=red");
 }
 
 static const char* captureSourceTag(CaptureSource source) {
@@ -421,7 +421,7 @@ static bool switchToPreviewMode() {
         return true;
     }
 
-    display_show_boot("Switching...", "Mode4 Preview");
+    display_show_boot("Switching...", "Mode4 MQTT");
 
     if (!camera_apply_preview_profile()) {
         Serial.println("Mode switch failed: camera preview profile");
@@ -431,22 +431,22 @@ static bool switchToPreviewMode() {
     }
 
     NetworkResult startResult = {};
-    if (!sendNetworkCommandAndWait(NETWORK_CMD_START_PREVIEW, startResult, 3000) || !startResult.ok) {
-        Serial.println("Mode switch failed: network start");
-        log_append("Mode switch failed: network start");
+    if (!sendNetworkCommandAndWait(NETWORK_CMD_START_PREVIEW, startResult, static_cast<uint32_t>(MQTT_WIFI_CONNECT_TIMEOUT_MS) + 5000U) || !startResult.ok) {
+        Serial.println("Mode switch failed: MQTT start");
+        log_append("Mode switch failed: MQTT start");
         (void)applyCameraProfileForMode(fromMode);
-        display_show_boot("Mode4 switch FAIL", "Network start");
+        display_show_boot("Mode4 switch FAIL", "MQTT start");
         return false;
     }
 
     setFillLight(false);
     setMode(APP_MODE_PREVIEW);
-    String previewUrl = String("http://") + String(startResult.ip) + "/";
-    Serial.println("Switched -> Mode4 Preview");
-    Serial.println(String("Preview URL: ") + previewUrl);
-    log_append("Switched -> Mode4 Preview");
-    log_append(String("Preview URL: ") + previewUrl);
-    display_show_boot("Mode4: Web Preview", previewUrl.c_str());
+    Serial.println("Switched -> Mode4 MQTT");
+    Serial.printf("MQTT topic: %s\n", MQTT_IMAGE_TOPIC);
+    Serial.printf("Device IP: %s\n", startResult.ip);
+    log_append("Switched -> Mode4 MQTT");
+    log_append(String("MQTT topic: ") + MQTT_IMAGE_TOPIC);
+    display_show_boot("Mode4: MQTT", MQTT_IMAGE_TOPIC);
     return true;
 }
 
@@ -693,9 +693,56 @@ static void captureTask(void* arg) {
 static void networkTask(void* arg) {
     (void)arg;
 
+    static bool s_mqttStreamEnabled = false;
+    static uint32_t s_lastMqttFrameMs = 0;
+
     for (;;) {
         NetworkCommand cmd = {};
-        if (!s_networkCommandQueue || xQueueReceive(s_networkCommandQueue, &cmd, portMAX_DELAY) != pdTRUE) {
+        const TickType_t queueWait =
+            s_mqttStreamEnabled ? pdMS_TO_TICKS(25) : portMAX_DELAY;
+
+        if (!s_networkCommandQueue ||
+            xQueueReceive(s_networkCommandQueue, &cmd, queueWait) != pdTRUE) {
+            if (!s_mqttStreamEnabled) {
+                continue;
+            }
+            // Timed wait while streaming: publish frames + MQTT keepalive.
+            mqtt_client_loop();
+
+            if (!network_sta_connected()) {
+                s_mqttStreamEnabled = false;
+                mqtt_client_disconnect();
+                vTaskDelay(pdMS_TO_TICKS(300));
+                continue;
+            }
+
+            if (!mqtt_client_connected()) {
+                (void)mqtt_client_connect();
+                vTaskDelay(pdMS_TO_TICKS(200));
+                continue;
+            }
+
+            const uint32_t nowMs = millis();
+            if (s_lastMqttFrameMs != 0 &&
+                (nowMs - s_lastMqttFrameMs) < static_cast<uint32_t>(CAM_PREVIEW_FRAME_DELAY_MS)) {
+                continue;
+            }
+
+            if (!camera_ok()) {
+                vTaskDelay(pdMS_TO_TICKS(80));
+                continue;
+            }
+
+            camera_fb_t* fb = camera_capture_frame();
+            if (!fb) {
+                vTaskDelay(pdMS_TO_TICKS(40));
+                continue;
+            }
+            if (fb->format == PIXFORMAT_JPEG && fb->buf && fb->len > 0) {
+                (void)mqtt_client_publish_jpeg(static_cast<const uint8_t*>(fb->buf), fb->len);
+            }
+            camera_return_frame(fb);
+            s_lastMqttFrameMs = millis();
             continue;
         }
 
@@ -705,28 +752,35 @@ static void networkTask(void* arg) {
         String ip = "0.0.0.0";
 
         if (cmd.type == NETWORK_CMD_START_PREVIEW) {
-            bool apOk = network_start_preview_ap();
-            bool httpOk = false;
-            if (apOk) {
-                httpOk = http_server_start();
+            s_mqttStreamEnabled = false;
+            s_lastMqttFrameMs = 0;
+
+            const bool wifiOk = network_sta_connect();
+            bool mqttOk = false;
+            if (wifiOk) {
+                mqttOk = mqtt_client_connect();
             }
-            if (!(apOk && httpOk)) {
-                http_server_stop();
-                network_stop_preview_ap();
-            }
-            result.ok = apOk && httpOk;
-            ip = network_preview_ap_ip();
-            if (result.ok) {
-                Serial.println(String("Network online: http://") + ip + "/");
+            if (!(wifiOk && mqttOk)) {
+                mqtt_client_disconnect();
+                network_sta_disconnect();
             } else {
-                Serial.println("Network start failed");
+                s_mqttStreamEnabled = true;
+            }
+            result.ok = wifiOk && mqttOk;
+            ip = network_sta_local_ip();
+            if (result.ok) {
+                Serial.printf("MQTT preview: IP=%s topic=%s\n", ip.c_str(), MQTT_IMAGE_TOPIC);
+            } else {
+                Serial.println("MQTT preview start failed (WiFi or broker)");
             }
         } else if (cmd.type == NETWORK_CMD_STOP_PREVIEW) {
-            http_server_stop();
-            network_stop_preview_ap();
+            s_mqttStreamEnabled = false;
+            s_lastMqttFrameMs = 0;
+            mqtt_client_disconnect();
+            network_sta_disconnect();
             result.ok = true;
             ip = "0.0.0.0";
-            Serial.println("Network offline");
+            Serial.println("MQTT preview stopped");
         }
 
         ip.toCharArray(result.ip, sizeof(result.ip));
@@ -879,6 +933,8 @@ void setup() {
     }
     Serial.println("Init: storage_init done");
 
+    (void)mqtt_client_init();
+
     setMode(APP_MODE_CAPTURE_NO_LIGHT);
     printHelp();
 
@@ -897,7 +953,7 @@ void setup() {
     xTaskCreatePinnedToCore(recordingSignalTask, "record_led_task", 3072, nullptr, 1, nullptr, 1);
     xTaskCreatePinnedToCore(captureTask, "capture_task", 8192, nullptr, 1, nullptr, 1);
     xTaskCreatePinnedToCore(tftPreviewTask, "tft_preview", 8192, nullptr, 1, nullptr, 1);
-    xTaskCreatePinnedToCore(networkTask, "network_task", 6144, nullptr, 1, nullptr, 0);
+    xTaskCreatePinnedToCore(networkTask, "network_task", 8192, nullptr, 1, nullptr, 0);
 }
 
 void loop() {
